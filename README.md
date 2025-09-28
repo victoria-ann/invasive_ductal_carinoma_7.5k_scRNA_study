@@ -1,2 +1,4 @@
-# invasive_ductal_carinoma_7.5k_scRNA_study
-This repository contains the R Markdown (.Rmd) file and the manuscript for a single-cell RNA-seq breast cancer study. The R Markdown file includes all code, analyses, and figures used to generate the results presented in the paper.
+This repository contains all materials for a single-cell RNA-seq study of breast cancer. It includes:
+R Markdown (.Rmd) file – Contains all code, analyses, and figures used to generate the results.
+Manuscript – The written paper detailing the study design, methods, results, and conclusions.
+This repository allows for full reproducibility of the analyses and figures presented in the manuscript.
