@@ -1,0 +1,474 @@
+---
+title: "invasive_ductal_carcinoma"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-07-25"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, tidy = TRUE, tidy.opts = list(width.cutoff = 60))
+library(hdf5r)
+library(dplyr)
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+```
+
+```{r read_ in_dataset, cache=TRUE}
+# Load the 5k lung dataset from the cellranger count pipeline
+breastcancer.data <- Read10X_h5("/Users/toripalecek/Documents/BMS690_Summer/Breast_Cancer_3p_raw_feature_bc_matrix.h5")
+
+# Initialize the Seurat object with the raw (non-normalized data).
+breastcancer <- CreateSeuratObject(counts = breastcancer.data, project = "7.5k_breast_cancer", min.cells = 3, min.features = 200)
+
+breastcancer
+```
+
+```{r QC Stats, cache=TRUE}
+# The [[ operator can add columns to object metadata. This is a great place to stash QC stats
+breastcancer[["percent.mt"]] <- PercentageFeatureSet(breastcancer, pattern = "^MT-")
+
+# Show QC metrics for the first 5 cells
+head(breastcancer@meta.data, 5)
+```
+
+While performing initial QC steps on this data we can see a relatively high percentage of mitochondrial RNA. This is not concerning for this dataset because it is an aggressive type a cancer. Aggressive cancers such as invasive ductal carcinoma can cause enough stress on the cell to produce a more elevated percentage of mitochondrial RNA.
+```{r QC violin plot, echo=FALSE, cache=TRUE}
+# Visualize QC metrics as a violin plot
+print(VlnPlot(breastcancer, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3))
+```
+We can see the same thing here in a different format. Based on these plots the data was subset to a feature count between 200 and 8500 and a mitochondrial RNA percentage less than 20. Again, the mitochondrial RNA percentage we are retaining is higher than in healthy cells, due to the stress on the cells caused by disease. 
+```{r Feature QC Scatter Plot, echo=FALSE, cache=TRUE}
+library(ggplot2)
+plot1 <- FeatureScatter(breastcancer, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+  theme(
+    text = element_text(size = 10),          # Overall text size
+    axis.text = element_text(size = 5),      # Axis labels
+    axis.title = element_text(size = 10),    # Axis titles
+    plot.title = element_text(size = 12),    # Title
+    legend.text = element_text(size = 5),    # Legend text
+    legend.title = element_text(size = 9)    # Legend title
+  )
+
+plot2 <- FeatureScatter(breastcancer, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") +
+  theme(
+    text = element_text(size = 10),
+    axis.text = element_text(size = 5),
+    axis.title = element_text(size = 10),
+    plot.title = element_text(size = 12),
+    legend.text = element_text(size = 5),
+    legend.title = element_text(size = 9)
+  )
+plot(plot1 + plot2)
+```
+
+```{r Subset Data, cache=TRUE}
+breastcancer <- subset(breastcancer, subset = nFeature_RNA > 200 & nFeature_RNA < 8500 & percent.mt < 20)
+```
+
+```{r QC Violin Plot Following Subsetting, echo=FALSE, cache=TRUE}
+# Visualize QC metrics as a violin plot
+print(VlnPlot(breastcancer, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3))
+```
+
+```{r Feature QC Scatter Plot Following Subsetting, echo=FALSE, cache=TRUE}
+library(ggplot2)
+plot1 <- FeatureScatter(breastcancer, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+  theme(
+    text = element_text(size = 10),          # Overall text size
+    axis.text = element_text(size = 5),      # Axis labels
+    axis.title = element_text(size = 10),    # Axis titles
+    plot.title = element_text(size = 12),    # Title
+    legend.text = element_text(size = 5),    # Legend text
+    legend.title = element_text(size = 9)    # Legend title
+  )
+
+plot2 <- FeatureScatter(breastcancer, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") +
+  theme(
+    text = element_text(size = 10),
+    axis.text = element_text(size = 5),
+    axis.title = element_text(size = 10),
+    plot.title = element_text(size = 12),
+    legend.text = element_text(size = 5),
+    legend.title = element_text(size = 9)
+  )
+plot(plot1 + plot2)
+```
+
+During this step in our analysis we’re first going to find the top 2000 most variable genes in our Seurat object using vst as the method or variance-stabilizing transformation. Running VariableFeatures on our new object produces a list of all 2000 of the most variable genes. We can then view the top 10 most variable gene.
+
+```{r find most variable features, cache=TRUE}
+#Normalize data
+breastcancer <- NormalizeData(breastcancer, normalization.method = "LogNormalize", scale.factor = 10000)
+
+#Identify highly variable features
+breastcancer <- FindVariableFeatures(breastcancer, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(breastcancer), 10)
+
+# Here we can see our top 10 most variable genes. 
+top10
+```
+
+We can see here that the 2000 most variable genes are plotted in red while the remaining 20914 genes are plotted in black. This plot is helpful in our analysis because in scRNA seq analysis, genes that are highly variable across cells often indicate different cell types or states
+The goal with selecting these genes out of the entire population of genes is to reduce noise by removing all of the low variance genes from analysis. This will be helpful when trying to distinguish between cells.  
+```{r Variable Feature Plot, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+# Plot variable features with and without labels
+plot1 <- VariableFeaturePlot(breastcancer)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE, xnudge = 0, ynudge = 0)
+
+# Display both side by side
+library(patchwork)
+wrap_plots(plot2, plot2, ncol = 2)
+```
+
+We can now access annotations for our top 10 genes through ensembl’s biomart, excluding LUM and SPP1. Their annotations were researched separately due to their gene annotations not being available with this tool at the present date.
+```{r Biomart Gene Annotations, cache=TRUE}
+library(biomaRt)
+
+# Connect to Ensembl (human)
+ensembl <- useEnsembl(biomart = "genes",
+                      dataset = "hsapiens_gene_ensembl")  # or useEnsembl("ensembl", ...)
+
+# Clean gene list (straight quotes, no leading spaces)
+genes <- c("DCN","APOE","IGFBP7","COL1A2","COL3A1","COL1A1","CCL3","SPARC")
+
+# Use a filter that matches an attribute you request back.
+# Here I use hgnc_symbol consistently.
+annotations <- getBM(
+  attributes = c("hgnc_symbol", "ensembl_gene_id", "description", "go_id"),
+  filters    = "hgnc_symbol",
+  values     = genes,
+  mart       = ensembl
+)
+
+annotations
+
+```
+
+Next we will scale the data so the highly-expressed genes won't inhibit our ability to view the expression of other genes
+```{r Scale Data, cache=TRUE}
+all.genes <- rownames(breastcancer)
+breastcancer <- ScaleData(breastcancer, features = all.genes)
+```
+
+Principle components analysis is run on the variable features we've already identified. We will look at the top 5 positive and negative loadings for each principle component. 
+From our output we can see that the genes with the top five increases in gene expression for PC 1 are VIM, ANXA1, GSTP1, YBX3, MARCKS. The top five genes that decrease in gene expression for PC 1 are CARTPT, PIP, GRB14, CLEC3A, CHGB. The same concept applies for the other lists of positive and negative loadings for our other 4 principle components. 
+```{r Top 5 Loadings for 5 PCAs, cache=TRUE}
+breastcancer <- RunPCA(breastcancer, features = VariableFeatures(object = breastcancer))
+
+# Examine and visualize PCA results a few different ways
+print(breastcancer[["pca"]], dims = 1:5, nfeatures = 5)
+```
+
+This visualization shows PC1 in the plot on the right and PC2 on the left. We can see the top 30 genes with the most positive/negative loadings.PC1 shows one negative loading at about -0.05, while the remaining 29 loadings are positive and above 0.04. This means 29 of the top 30 genes for PC1 increased in gene expression. For PC2 we can see that all 30 of the top 30 genes decreased in gene expression and can be found between -0.0650 and -0.0775.
+```{r Loadings Plot, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+VizDimLoadings(breastcancer, dims = 1:2, reduction = "pca")
+```
+
+```{r Loadings Plot 30, fig.width=20, fig.height=25, warning=FALSE, message=FALSE}
+VizDimLoadings(breastcancer, dims = 1:20, reduction = "pca")
+```
+
+In this plot we see PC1 and PC2 plotted against each other. Each point indicates a single cell. Where we see clustering we see cells with similar gene expression patterns. In this plot we can see one main cluster with a lot of outliers. This likely indicates one cell type, which is what we would expect. Our data is from one type of cells that were sorted prior to sequencing. We would expect to identify one cell type. In this case we are interested in the outliers.
+```{r Dimensional Analysis Plot, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+DimPlot(breastcancer, reduction = "pca") + NoLegend()
+```
+
+Here we have a heatmap of the top loadings for PC1 and the top 500 most variable cells. We see a distinct pattern for most of these genes where we either see expression of that gene increase from left to right (purple to yellow) or decrease from left to right (yellow to purple). The black indicates the gene is not significantly differentially expressed. We see about half of the genes go from a negative differential gene expression to no signficiant difference for PC1. 
+```{r Dimensional Analysis Heatmap, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+DimHeatmap(breastcancer, dims = 1, cells = 500, balanced = TRUE)
+```
+
+We then used heatmaps for the top 15 PC's to determine which ones we want to keep for our analysis. We looked for distinct patterns/contrast to determine which PCs we wanted to include in downstream analysis. Based on these heatmaps we determined PCs 1-15 should be used in downstream analysis.
+```{r Dimensional Analysis Heatmaps, fig.width=12, fig.height=15, warning=FALSE, message=FALSE}
+DimHeatmap(breastcancer, dims = 1:20, cells = 500, balanced = TRUE)
+```
+
+We then created an elbow plot to confirm the conclusion we made with the previous heatmaps. As we can see the PCs plateau in standard deviation decrease at about PC 15. This aligns with our decision to keep PCs 1-15 for our downstream analysis. 
+```{r Elbow Plot, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+ElbowPlot(breastcancer)
+```
+
+In this next step we clustered our cells using the Jaccard similarity distance matrix to find "neighbors" using our first 15 PC's. The Louvain algorithm was then applied in FindClusters to cluster cells together. The resolution is set to 0.7 due to the size of the dataset. We then looked at the cluster IDs of the first 5 cells.
+```{r, cache=TRUE}
+breastcancer <- FindNeighbors(breastcancer, dims = 1:15)
+breastcancer <- FindClusters(breastcancer, resolution = 0.7)
+
+# Look at cluster IDs of the first 5 cells
+head(Idents(breastcancer), 5)
+```
+
+Now that we have clustered our cells we can now perform non-linear dimensional reduction using UMAP. In this plot the cells that are grouped/clustered together usually strongly indicate different cell types. In this study, because we are only looking at one cell type, the clusters may indicate different pathologies of the same diseased cells. Analyzing this plot we can see one main cluster with two other larger clusters and four smaller clusters. In the rest of our analysis we will be determining what changes in gene expression are causing these differences in clustering.
+```{r UMAP, fig.width=10, fig.height=4, warning=FALSE, message=FALSE, cache=TRUE}
+breastcancer <- RunUMAP(breastcancer, dims = 1:15)
+
+# note that you can set `label = TRUE` or use the LabelClusters function to help label
+# individual clusters
+DimPlot(breastcancer, reduction = "umap")
+```
+
+We can see the same thing for tSNE. I will be moving forward with the UMAP non-linear dimensional reduction for the remainder of my analysis.
+```{r tSNE, fig.width=10, fig.height=4, warning=FALSE, message=FALSE, cache=TRUE}
+breastcancertsne <- RunTSNE(breastcancer, dims = 1:15)  # choose how many PCs to use
+DimPlot(breastcancertsne, reduction = "tsne")
+```
+
+We now look at differential expression. We use this to find markers for each cluster. Here we're looking for the top 5 markers of cluster 2.
+```{r, cache=TRUE}
+# find all markers of cluster 2
+cluster2.markers <- FindMarkers(breastcancer, ident.1 = 2)
+head(cluster2.markers, n = 5)
+```
+
+And here we can see the top 5 markers that differentiate cluster 5 from 0 and 3. 
+```{r, cache=TRUE}
+# find all markers distinguishing cluster 5 from clusters 0 and 3
+cluster5.markers <- FindMarkers(breastcancer, ident.1 = 5, ident.2 = c(0, 3))
+head(cluster5.markers, n = 5)
+```
+
+Finally we looked for all of the positive markers for each cluster compared to all of the remaining cells.
+```{r, cache=TRUE}
+# find markers for every cluster compared to all remaining cells, report only the positive
+# ones
+breastcancer.markers <- FindAllMarkers(breastcancer, only.pos = TRUE)
+breastcancer.markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1)
+
+top10 <- breastcancer.markers %>% group_by(cluster) %>% top_n(n = 20, wt = avg_log2FC)
+top10
+```
+
+Next we looked at the classification power using ROC. This showed us the classification power of individual markers from 0-1.
+```{r, cache=TRUE}
+cluster0.markers <- FindMarkers(breastcancer, ident.1 = 0, logfc.threshold = 0.25, test.use = "roc", only.pos = TRUE)
+```
+
+Here we looked at the expression probability distribution across all clusters for the top two markers in cluster 2. You can see that DNAJB1 was highly expressed across all clusters, but cluster 2 had many more cells with a high epression level of DNAJB1 than the other clusters. For the EGR2 gene you can see that it was clearly most highly expressed in cluster two with some slighly elevated expression levels in slusters 0, 7 and 8.
+```{r Violin Cluster Analysis, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+VlnPlot(breastcancer, features = c("DNAJB1", "EGR2"))
+```
+
+Here we looked at the same plot with raw counts.
+```{r Violin Cluster Analysis 2, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+# you can plot raw counts as well
+VlnPlot(breastcancer, features = c("DNAJB1", "EGR2"), slot = "counts", log = TRUE)
+```
+
+This plot shows the feature expression on a PCA plot for the top 10 feature for cluster 0 (identified above). We can see that the majority of the increased gene expression is in cluster 0, but does not appear to be in the majority of cells in cluster 0. This makes sense because clusters 0, 2 and 4 all appear to make up one giant cluster. This would indicate that these clusters aren't really that different in their gene expression. We would not expect to see large differences in the gene expression profiles of these three clusters.
+```{r Markers Across Clusters 0, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+FeaturePlot(breastcancer, features = c("AC091173.1","AC108451.2","AL365256.1","CRH,AC023302.2","AC103740.2","POU3F2","AC092153.1","AC016705.3"))
+```
+
+Now looking at cluster 1, which is much more of a distinct cluster, we don't see what we might expect. CDCA8 and MIF-AS1 seems to be much more highly expressed in cluster 1 than in every other cluster but only in a small subset of cells. Because cluster 1 appears more distinct we had thought that there might be more signficant changes in gene expression for the top 10 genes but it does not appear that that is the case. 
+```{r Markers Across Clusters 1, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+FeaturePlot(breastcancer, features = c("CDCA8", "MIF-AS1", "DNAJC28", "NECAB2", "LINC02608", "AC023632.2", "ERICD", "KCNK15-AS1", "AC026202.2", "MORN5"))
+```
+
+This plot indicates the top 20 markers for each cluster. We can see by this visual that it appears that the smaller clusters seem to have more distinct variances in gene expression than the larger clusters do. The larger clusters seem to have some increased or decreased gene expression but there are a lot a cells that don't seem to have any change at all in gene expression for those same genes. If we look at clusters 4-10 we can see that there appears to be a much more across the board increase in gene expression for a handful of specific genes that is not seen in the other clusters. We might expect this because if there were changes in the main tumor cells it would begin in smaller subsets of cells, such as the smaller clusters. 
+```{r Cluster Heatmap, fig.width=15, fig.height=9, warning=FALSE, message=FALSE, cache=TRUE}
+breastcancer.markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1) %>%
+    slice_head(n = 10) %>%
+    ungroup() -> top10
+DoHeatmap(breastcancer, features = top10$gene) +
+  NoLegend() +
+  theme(axis.text.y = element_text(size = 6)) +
+  coord_cartesian(clip = "off")
+```
+
+```{r All markers postive and negative, cache=TRUE}
+# find markers for every cluster compared to all remaining cells, report only the positive
+# ones
+breastcancer.allmarkers <- FindAllMarkers(breastcancer, only.pos = FALSE)
+breastcancer.allmarkers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1)
+
+top20 <- breastcancer.allmarkers %>% group_by(cluster) %>% top_n(n = 20, wt = avg_log2FC)
+top20
+```
+
+```{r Top Markers cluster 7, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+FeaturePlot(breastcancer, features = c("NCAPH","PKMYT1","CENPF","EXO1"))
+```
+
+```{r Violin Cluster Analysis cluster 7, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+VlnPlot(breastcancer, features = c("NCAPH","PKMYT1","CENPF","EXO1" ))
+```
+
+
+```{r Top Markers cluster 6, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+FeaturePlot(breastcancer, features = c("DSCAM-AS1","SOX2-OT","IGSF1" ))
+```
+```{r Violin Cluster Analysis cluster 6, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+VlnPlot(breastcancer, features = c("DSCAM-AS1","SOX2-OT","IGSF1" ))
+```
+
+EGR1 in breast cancer has demonstrated itself to be a tumor suppressor gene. When it is normally expressed it can arrest breast cancer tumor cells in G0 or G1, inhibiting further growth and proliferation. When EGR1 is down regulated the opposite is true and can be  seen as a common poor prognostic marker for breast cancers. TNFSF10 both initiates apoptosis and regulated metastasis of cancers when normally regulated. It can slow or stop the metastasis or invasion of cancer cells. A reduced expression of TNFSF10 removes one of the cells normal protections against proliferation. We can see here that both EGR1 and TNFSF10 are being expressed much less in clusters 1 and 5 than almost every other cluster. We can also see that clusters 0,2 and 4 are seeing the most normal expression of these genes. This could potentially be one of the prominent factors for why clusters 1 and 5 contain so many cells when compared to the other subclusters outside of 0,2 and 4.
+```{r markers heatmap cluster 1 genes, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+mygenes <- c("TNFSF10", "EGR1")
+DoHeatmap(
+  object = breastcancer,
+  features = mygenes,
+  group.by = "seurat_clusters",
+  label = TRUE
+) +
+  scale_fill_gradientn(colors = c("purple", "black","yellow"))
+```
+
+
+When we go back and look at our 10 most variably expressed genes we can see that they are most highly express in clusters 5, 8, 9 and 10. From the research done on these genes this could be indicative of a subclone  with unfavorable genetic mutations. The upregulation of these genes according to several research studies suggests a poor prognostic outcome. If these smaller clusters of cells continue to proliferate the overall prognosis of the patient could change if they currently have a favorable prognosis.re
+```{r Top Markers Across Clusters, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+FeaturePlot(breastcancer, features = c("DCN","APOE", "IGFBP7","LUM", "COL1A2", "COL3A1","COL1A1", "SGPP1", "CCL3", "SPARC" ))
+```
+
+Here we can see that it seems that IGFBP7 and SPARC are similarly up regulated in cluster 9, DCN, IGFBP7, LUM, COL1A2, COL1A1, COL3A1 and SPARC are similarly up regulated in cluster 8, IGFBP7, COL1A1, COL1A2, COL3A1 and SPARC are similarly up regulated in cluster 10, and APOE and CCL3 and SGPP1 are similarly upregulated in cluster 5. 
+```{r Violin Cluster Analysis top 10, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+VlnPlot(breastcancer, features = c("DCN","APOE", "IGFBP7","LUM", "COL1A2", "COL3A1","COL1A1", "SGPP1", "CCL3", "SPARC"))
+```
+Seeing that there seems to be a slight difference in the gene expression of cells from cluster 8 when compared to clusters 9 and 10 based on the visuals above. I decided to look at the top 20 genes found in cluster 8 compared to 9 and 10. The expression of DCN and LUM together was of particular interest. 
+```{r cluster 8 vs 9 and 10, cache=TRUE}
+# find all markers distinguishing cluster 5 from clusters 0 and 3
+cluster8_vs_9_10.markers <- FindMarkers(breastcancer, ident.1 = 8, ident.2 = c(9, 10))
+head(cluster8_vs_9_10.markers, n = 20)
+```
+
+```{r clusters 8 9 and 10 vs all, cache=TRUE}
+markers_8_9_10_vs_all <- FindMarkers(
+  breastcancer,
+  ident.1 = c(8, 9, 10),
+  min.pct = 0,
+  logfc.threshold = 0
+)
+head(markers_8_9_10_vs_all, n = 30)
+```
+COL1A1, COL1A2, SPARC, DCN and LUM are all involved in remodeling of the ECM. Remodelng of the extracellular matrix, or EMC, can impact the presence/performance of surface receptors and the ability of chemo therapies to enter or impact the cell. The decreased effectiveness of chemotherapy caused by EMC remodeling can lead to cancer proliferation and metastasis.
+```{r COL3A1 in clusters 8, 9 and 10}
+markers_8_9_10_vs_all["COL3A1", ]
+```
+```{r COL1A1 in clusters 8, 9 and 10}
+markers_8_9_10_vs_all["COL1A1", ]
+```
+
+```{r COL1A2 in clusters 8, 9 and 10}
+markers_8_9_10_vs_all["COL1A2", ]
+```
+
+```{r DCN in clusters 8, 9 and 10}
+markers_8_9_10_vs_all["DCN", ]
+```
+
+```{r LUM in clusters 8, 9 and 10}
+markers_8_9_10_vs_all["LUM", ]
+```
+
+ Clusters 8, 9 and 10 showed the highest expression of many of the top 10 variably expressed genes. These genes consisted of SPARC (p < 2.2e-308, Log2FC = 10.3), DCN (p = 9.9e-230, Log2FC = 11.4), LUM (p = 7.2e-259, Log2FC = 11.0), COL1A1 (p = 1.4e-171, Log2FC =9.0 ), COL1A2 (p < 2.2e-308, Log2FC = 9.8) and COL3A1(p < 2.2e-308, Log2FC = 10.0) which all had a p value of 1.4 to the power of -171 or lower and a log2 fold change of 9 or greater and all play a large role in remodeling of the extracellular matrix or ECM. IGFBP7(p < 2.2e-308, Log2FC = 10.0) was also highly expressed across clusters 8, 9 and 10 and is linked to disease progression in breast cancer (figure 11). In addition, LUM and DCN, when increase expression of both is observed, is typically associated with cancer associated fibroblast (CAFs).
+
+```{r Markers Across Clusters 8 9 and 10, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+FeaturePlot(breastcancer, features = c("DCN","IGFBP7","LUM", "COL1A2", "COL3A1","COL1A1", "SPARC" ))
+```
+```{r Violin Cluster Analysis 8 9 and 10, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+VlnPlot(breastcancer, features = c("DCN","IGFBP7","LUM", "COL1A2", "COL3A1","COL1A1", "SPARC" ))
+```
+
+
+Identify the number of cells in each cluster
+```{r}
+table(Idents(breastcancer))
+```
+
+
+Here we look at the top 30 genes that differ in expression from cluster 5 in comparison to all other cells.
+```{r cluster 5 vs all, cache=TRUE}
+markers_5_vs_all <- FindMarkers(
+  breastcancer,
+  ident.1 = 5,
+  min.pct = 0,
+  logfc.threshold = 0
+)
+head(markers_5_vs_all, n = 30)
+```
+```{r APOE in cluster 5, cache = TRUE}
+markers_5_vs_all["APOE", ]
+```
+
+TYROBP, APOE and CCL3 are much more highly expressed than in any other cluster.TYROBP is a protein tyrosine binding protein when highly expressed is associated with a poor prognosis in breast cancer and other malignancies. APOE is a lipoprotein that mediates lipid transport between organs and is has been linked to breast cancer metastasis when highly expressed. CCL3 is an inflammatory chemokine that can inhibit apoptosis and aid in invasion to other tissues when expression is increased. 
+```{r Top Markers Across Clusters for Cluster 5, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+FeaturePlot(breastcancer, features = c("TYROBP","APOE","CCL3"))
+```
+
+```{r Violin Cluster Analysis 5, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+VlnPlot(breastcancer, features = c("TYROBP","APOE","CCL3" ))
+```
+
+
+The low expression of several mitochondrial genes, including essential genes MT-CYB and MT-ND, in comparison to their expression in the main clusters 0, 2 and 4 may indicate an increase in reactive oxygen species (ROS) linked to an increased cancer cell survival. It is suggested that disruption of oxidative phosphorylation (OXPHOS) caused by mtDNA mutations could be linked to suppression of apoptosis.
+```{r cluster 1 vs 0 2 and 4, cache=TRUE}
+# find all markers distinguishing cluster 5 from clusters 0 and 3
+cluster1_vs_0_2_4.markers <- FindMarkers(breastcancer, ident.1 = 1, ident.2 = c(0, 2, 4))
+head(cluster1_vs_0_2_4.markers, n = 30)
+```
+
+Because TNFSF10 is showing significantly lower expression of TNFSF1 (p-value=1.82e-264, avg log2FC=-1.55) than clusters 0, 2 and 4 where the expression is elevated. This indicates that cells from cluster 1 are not seeing the same tumor suppression that cells from 0, 2 and 4 are. 
+```{r TNFSF1 in cluster 1, cache = TRUE}
+cluster1_vs_0_2_4.markers["TNFSF10", ]
+```
+```{r EGR1 in cluster 1, cache = TRUE}
+cluster1_vs_0_2_4.markers["EGR1", ]
+```
+
+Decreased expression of several critical genes was observed in cluster 1. Cluster 1 had a much lower expression of EGR1(p = 5.5e-147, Log2FC = -1.4), TNFSF10(p = 3.5e-264, Log2FC = -1.6) and several key mitochondrial genes (MT-CO2(p = 5.1e-295, Log2FC = -2.9), MT-CYB(p = 7.1e-293, Log2FC = -2.8), MT-ND4(p = 7.5e-289, Log2FC = -2.9)) (figure 16) which all had a p value of at least 5.5 times 10 to the power of -147 and a log 2 fold change of at least -1.6. EGR1 and TNFSF10 are known tumor suppressors. Their expression was also reduced in cluster 5 but remained mostly normal in all other clusters. The reduced expression or mutation of mitochondrial genes has been linked to poor prognosis. 
+```{r Mitochondrial markers heatmap cluster 1, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+mygenes <- c("MT-ND4L", "MT-CO2", "MT-CYB", "MT-ND4", "MT-CO1")
+DoHeatmap(
+  object = breastcancer,
+  features = mygenes,
+  group.by = "seurat_clusters",
+  label = TRUE
+) +
+  scale_fill_gradientn(colors = c("purple", "black","yellow"))
+```
+
+```{r cluster 3 vs 0 2 and 4, cache=TRUE}
+# find all markers distinguishing cluster 5 from clusters 0 and 3
+cluster3_vs_0_2_4.markers <- FindMarkers(breastcancer, ident.1 = 3, ident.2 = c(0, 2, 4))
+head(cluster3_vs_0_2_4.markers, n = 30)
+```
+
+In cluster 3 decreased expression of several ribosomal protein genes, including RPS9(p = 3.6e-218, Log2FC =-1.3) with a p value of 3.6 times 10 to the negative 218th power and a log2 fold change of -1.3, was observed (figure 12). The down regulation of this specific ribosomal protein has been linked to poor prognostic outcomes in patients with breast cancer. 
+```{r Ribosomal markers heatmap cluster 3, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+mygenes <- c("RPS9", "RPS12", "RPL28","RPL35","RPL36A","RPS4X","RPS15","RPS18","RPL29","RPL36","RPL13")
+DoHeatmap(
+  object = breastcancer,
+  features = mygenes,
+  group.by = "seurat_clusters",
+  label = TRUE
+) +
+  scale_fill_gradientn(colors = c("purple", "black","yellow"))
+```
+Clusters 0, 2 and 4 all observed higher expression of a substantial amount of un-named and unclassified genes, some of which are AC091173.1(p = 2.8e-15, Log2FC = 2.8), AC005841.1(p = 4.5e-6, Log2FC = 2.9) and AC011471.2(p = 1.47e-1, Log2FC = 3.5) which all had a p value of at least 4.5 time 10 to the -6th power and a log2 fold change of at least 2.8. Because these genes are unannotated/unclassified we do not know what the impact of their overexpression is yet. Clusters 0, 2 and 4 also did not contain the same differential expression of poor prognostic markers seen in all of the other clusters.
+```{r unclassified genes clusters 0 2 and 4, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+mygenes <- c("AC091173.1","AC108451.2","AL365256.1","AC023302.2","AC103740.2","AC092153.1","AC016705.3","AL136221.1","AL157902.1","AC005841.1","AC145207.6","AP000679.1","AP003059.2","AC092268.2","AC107081.2","AC002128.1","AL137786.1","AC010536.3","AC090946.1","AC011479.4","AC007906.2","AL451069.2","AL132780.2","AL137009.1","AC023632.2","AC026202.2","AP003778.1","AC093575.1","AC010327.4","AP001468.1")
+DoHeatmap(
+  object = breastcancer,
+  features = mygenes,
+  group.by = "seurat_clusters",
+  label = TRUE
+) +
+  scale_fill_gradientn(colors = c("purple", "black","yellow"))
+```
+
+```{r Violin Cluster Analysis 0 2 4 unidentified genes, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+VlnPlot(breastcancer, features = c("AC023302.2","AC026202.2","AL132780.2" ))
+```
+```{r Top Markers Across Clusters for Clusters 0 2 and 4, fig.width=12, fig.height=6, warning=FALSE, message=FALSE}
+FeaturePlot(breastcancer, features = c("AC023302.2","AC026202.2","AL132780.2"))
+```
+
+
